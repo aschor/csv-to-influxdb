@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+    "reflect"
 
 	"github.com/influxdata/influxdb/client/v2"
 	"github.com/jpillora/backoff"
@@ -112,14 +113,14 @@ func main() {
 		//check timestamp and tag columns
 		hasTs := false
 		n := len(tagNames)
-		for _, h := range hdrs {
-			if h == conf.TimestampColumn {
+		for _, value := range hdrs {
+			if value == conf.TimestampColumn {
 				hasTs = true
-			} else if tagNames[h] {
-				log.Println(h)
+			} else if tagNames[value] {
+				log.Println(value)
 				n--
 			} else if firstField == "" {
-				firstField = h
+				firstField = value
 			}
 		}
 		if firstField == "" {
@@ -142,7 +143,7 @@ func main() {
 	// lastCount := ""
 
 	//write the current batch
-	write := func() {
+ 	write := func() {
 		if bpSize == 0 {
 			return
 		}
@@ -168,10 +169,89 @@ func main() {
 		//reset
 		bp, _ = client.NewBatchPoints(bpConfig)
 		bpSize = 0
-	}
-
-	//read csv, line by line
+	} 
+    
+    //scan des premieres lignes pour determiner le type des mesures
+    fieldsKinds := map[string]interface{}{} //association nom de mesure / type
 	r := csv.NewReader(f)
+    nokfields := 1
+	for i := 0; i < 100 ; i++ {
+        records, err := r.Read()
+		if nokfields == 0 {
+            break //on a trouve le type de toutes les mesures
+        }
+        nokfields = 0 //si on trouve tous les champs sur cette ligne ci, on reste à 0 et on sort de la boucle à la prochaine itération
+        if err != nil {
+			if err == io.EOF {
+				break
+			}
+			log.Fatalf("CSV error: %s", err)
+		}
+		if i == 0 {
+			setHeaders(records)
+            nokfields = 1 //pour continer à chercher après la ligne des headers ...
+			continue
+		}
+        
+		for key, value := range headers {
+			r := records[key]
+			//tags are just strings
+			if tagNames[value] {
+				continue
+			}
+			//fields require string parsing && on ne veut pas que leur type change au fur et à mesure qu'on rencontre des NULL ou des champs vides, donc on les cherche une bonne fois pour toutes, sur les 100 premieres lignes.
+            _,ok := fieldsKinds[value]            
+			if !ok {
+                nokfields++
+                if timestampRe.MatchString(r) {
+                    nokfields--
+                    continue
+                } else if integerRe.MatchString(r) {
+                    i, _ := strconv.Atoi(r)
+                    fieldsKinds[value] = reflect.TypeOf(i);
+                    nokfields--
+                } else if floatRe.MatchString(r) {
+                    f, _ := strconv.ParseFloat(r, 64)
+                    fieldsKinds[value] = reflect.TypeOf(f);
+                    nokfields--
+                } else if trueRe.MatchString(r) {
+                    fieldsKinds[value] = reflect.TypeOf(true);
+                    nokfields--
+                } else if falseRe.MatchString(r) {
+                    fieldsKinds[value] = reflect.TypeOf(false);
+                    nokfields--
+                } //si null, on verra sur les lignes suivantes. Et une mesure n'est pas sensée être un string. 
+            } 
+		}        
+        
+    }
+    f.Close()
+    
+	//open csv file again
+	f, err = os.Open(conf.CSVFile)
+	if err != nil {
+		log.Fatalf("Failed to open %s", conf.CSVFile)
+	}    
+    
+    //////TEST : affichier les types
+    for _,value := range headers {
+            _,isafield := fieldsKinds[value]
+            if tagNames[value] {
+				fmt.Printf("tag %s : string\n", value)
+			} else if value == conf.TimestampColumn {
+                fmt.Printf("timestamp %s\n", value)
+            } else if isafield {
+                fmt.Printf("mesure %s : %s\n", value, fieldsKinds[value])
+            } else {
+                fmt.Printf("pas de type trouvé sur les 100 premières lignes pour la colonne : %s\n",value)
+                fmt.Printf("sortie ...")
+                os.Exit(1)
+            }
+    }
+  
+     
+	//read csv, line by line
+	r = csv.NewReader(f)
 	for i := 0; ; i++ {
 		records, err := r.Read()
 		if err != nil {
@@ -192,37 +272,41 @@ func main() {
 		var ts time.Time
 
 		//move all into tags and fields
-		for hi, h := range headers {
-			r := records[hi]
+		for key, value := range headers {
+			r := records[key]
 			//tags are just strings
-			if tagNames[h] {
-				tags[h] = r
+			if tagNames[value] {
+				tags[value] = r
 				continue
 			}
 			//fields require string parsing
 			if timestampRe.MatchString(r) {
 				t, err := time.Parse(conf.TimestampFormat, r)
 				if err != nil {
-					fmt.Printf("#%d: %s: Invalid time: %s\n", i, h, err)
+					fmt.Printf("#%d: %s: Invalid time: %s\n", i, value, err)
 					continue
 				}
-				if conf.TimestampColumn == h {
+				if conf.TimestampColumn == value {
 					ts = t //the timestamp column!
 					continue
 				}
-				fields[h] = t
-			} else if integerRe.MatchString(r) {
+				fields[value] = t
+//			} else if integerRe.MatchString(r) {
+			} else if fieldsKinds[value] == reflect.TypeOf(2) {
 				i, _ := strconv.Atoi(r)
-				fields[h] = i
-			} else if floatRe.MatchString(r) {
+				fields[value] = i
+//			} else if floatRe.MatchString(r) {
+			} else if fieldsKinds[value] == reflect.TypeOf(2.2) {
 				f, _ := strconv.ParseFloat(r, 64)
-				fields[h] = f
-			} else if trueRe.MatchString(r) {
-				fields[h] = true
-			} else if falseRe.MatchString(r) {
-				fields[h] = false
+				fields[value] = f
+//			} else if trueRe.MatchString(r) {
+			} else if fieldsKinds[value] == reflect.TypeOf(true) {
+				fields[value] = true
+//			} else if falseRe.MatchString(r) {
+			} else if fieldsKinds[value] == reflect.TypeOf(false) {
+				fields[value] = false
 			} else {
-				fields[h] = r
+				fields[value] = r //probable crash DB car type de mesure inconnu
 			}
 		}
 
@@ -237,5 +321,6 @@ func main() {
 	}
 	//send remainder
 	write()
-	log.Printf("Done (wrote %d points)", totalSize)
+	log.Printf("Done (wrote %d points)", totalSize) 
 }
+
