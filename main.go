@@ -25,10 +25,11 @@ type config struct {
 	Database        string `help:"Database name"`
 	Measurement     string `help:"Measurement name"`
 	BatchSize       int    `help:"Batch insert size"`
-	TagColumns      string `help:"Comma-separated list of columns to use as tags instead of fields"`
+	TagColumns      string `help:"Separator(Comma)-separated list of columns to use as tags instead of fields. See Separator option"`
 	TimestampColumn string `short:"ts" help:"Header name of the column to use as the timestamp"`
 	TimestampFormat string `short:"tf" help:"Timestamp format used to parse all timestamp records"`
 	NoAutoCreate    bool   `help:"Disable automatic creation of database"`
+    Separator       string `short:"F" help:"input CSV separator character"`
 }
 
 func main() {
@@ -41,6 +42,7 @@ func main() {
 		BatchSize:       5000,
 		TimestampColumn: "timestamp",
 		TimestampFormat: "2006-01-02 15:04:05",
+        Separator:       ",",
 	}
 
 	//parse config
@@ -50,9 +52,11 @@ func main() {
 		Version(VERSION).
 		Parse()
 
+    var seprune = []rune(conf.Separator)[0] //string to rune conversion
+    
 	//set tag names
 	tagNames := map[string]bool{}
-	for _, name := range strings.Split(conf.TagColumns, ",") {
+	for _, name := range strings.Split(conf.TagColumns, conf.Separator) {
 		name = strings.TrimSpace(name)
 		if name != "" {
 			tagNames[name] = true
@@ -174,6 +178,9 @@ func main() {
     //scan des premieres lignes pour determiner le type des mesures
     fieldsKinds := map[string]interface{}{} //association nom de mesure / type
 	r := csv.NewReader(f)
+    
+    r.Comma = seprune // Use user-defined-delimitor instead of comma
+    
     nokfields := 1
 	for i := 0; i < 100 ; i++ {
         records, err := r.Read()
@@ -252,6 +259,7 @@ func main() {
      
 	//read csv, line by line
 	r = csv.NewReader(f)
+    r.Comma = seprune // Use user-defined-delimitor instead of comma
 	for i := 0; ; i++ {
 		records, err := r.Read()
 		if err != nil {
